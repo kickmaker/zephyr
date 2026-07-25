@@ -16,6 +16,8 @@
 
 #include "eth_stm32_hal_priv.h"
 
+#define DT_DRV_COMPAT st_stm32_ethernet
+
 LOG_MODULE_REGISTER(eth_stm32_hal_ptp, CONFIG_ETHERNET_LOG_LEVEL);
 
 /* Naming of the  ETH PTP Config Status changes depending on the stm32 series */
@@ -27,17 +29,6 @@ LOG_MODULE_REGISTER(eth_stm32_hal_ptp, CONFIG_ETHERNET_LOG_LEVEL);
 #define ETH_STM32_PTP_NOT_CONFIGURED HAL_ETH_PTP_NOT_CONFIGURED
 #endif /* stm32F7x or sm32F4x */
 
-bool eth_stm32_is_ptp_pkt(struct net_if *iface, struct net_pkt *pkt)
-{
-	if (net_ntohs(NET_ETH_HDR(pkt)->type) != NET_ETH_PTYPE_PTP) {
-		return false;
-	}
-
-	net_pkt_set_priority(pkt, NET_PRIORITY_CA);
-
-	return true;
-}
-
 void HAL_ETH_TxPtpCallback(uint32_t *buff, ETH_TimeStampTypeDef *timestamp)
 {
 	struct eth_stm32_tx_context *ctx = (struct eth_stm32_tx_context *)buff;
@@ -48,7 +39,8 @@ void HAL_ETH_TxPtpCallback(uint32_t *buff, ETH_TimeStampTypeDef *timestamp)
 	net_if_add_tx_timestamp(ctx->pkt);
 }
 
-const struct device *eth_stm32_get_ptp_clock(const struct device *dev)
+const struct device *eth_stm32_get_ptp_clock(const struct device *dev,
+					     struct net_if *iface __unused)
 {
 	struct eth_stm32_hal_dev_data *dev_data = dev->data;
 
@@ -285,6 +277,12 @@ static DEVICE_API(ptp_clock, api) = {
 	.rate_adjust = ptp_clock_stm32_rate_adjust,
 };
 
+BUILD_ASSERT(NSEC_PER_SEC % CONFIG_ETH_STM32_HAL_PTP_CLOCK_SRC_HZ == 0,
+	     "PTP clock period must be an integer nanosecond value");
+
+BUILD_ASSERT(NSEC_PER_SEC / CONFIG_ETH_STM32_HAL_PTP_CLOCK_SRC_HZ <= UINT8_MAX,
+	     "PTP clock period is more than 255 nanoseconds");
+
 static int ptp_stm32_init(const struct device *port)
 {
 	const struct device *const dev = DEVICE_DT_GET(DT_NODELABEL(mac));
@@ -293,8 +291,8 @@ static int ptp_stm32_init(const struct device *port)
 	struct ptp_context *ptp_context = port->data;
 	ETH_HandleTypeDef *heth = &eth_dev_data->heth;
 	int ret;
-	uint32_t ptp_hclk_rate;
-	uint32_t ss_incr_ns;
+	uint32_t ptp_clk_rate;
+	uint32_t ss_incr_ns = NSEC_PER_SEC / CONFIG_ETH_STM32_HAL_PTP_CLOCK_SRC_HZ;
 	uint32_t addend_val;
 
 	eth_dev_data->ptp_clock = port;
@@ -302,26 +300,16 @@ static int ptp_stm32_init(const struct device *port)
 
 	eth_stm32_ptp_enable_timestamping(heth);
 
-	/* Query ethernet clock rate */
+	/* Query the MAC timestamp reference clock rate */
 	clock_control_subsys_t rate_clk = (void *)&eth_cfg->pclken[eth_cfg->rate_pclken_idx];
 
 	ret = clock_control_get_rate(DEVICE_DT_GET(STM32_CLOCK_CONTROL_NODE), rate_clk,
-				     &ptp_hclk_rate);
+				     &ptp_clk_rate);
 	if (ret) {
-		LOG_ERR("Failed to query ethernet clock");
+		LOG_ERR("Failed to query PTP reference clock");
 		return -EIO;
 	}
 
-	/* Program the subsecond increment register based on the PTP clock freq */
-	if (NSEC_PER_SEC % CONFIG_ETH_STM32_HAL_PTP_CLOCK_SRC_HZ != 0) {
-		LOG_ERR("PTP clock period must be an integer nanosecond value");
-		return -EINVAL;
-	}
-	ss_incr_ns = NSEC_PER_SEC / CONFIG_ETH_STM32_HAL_PTP_CLOCK_SRC_HZ;
-	if (ss_incr_ns > UINT8_MAX) {
-		LOG_ERR("PTP clock period is more than %d nanoseconds", UINT8_MAX);
-		return -EINVAL;
-	}
 #if DT_HAS_COMPAT_STATUS_OKAY(st_stm32h7_ethernet)
 	heth->Instance->MACSSIR = ss_incr_ns << ETH_MACMACSSIR_SSINC_Pos;
 #else
@@ -330,12 +318,13 @@ static int ptp_stm32_init(const struct device *port)
 
 	/* Program timestamp addend register */
 	eth_dev_data->clk_ratio =
-		((double)CONFIG_ETH_STM32_HAL_PTP_CLOCK_SRC_HZ) / ((double)ptp_hclk_rate);
+		((double)CONFIG_ETH_STM32_HAL_PTP_CLOCK_SRC_HZ) / ((double)ptp_clk_rate);
 	/*
-	 * clk_ratio is a ratio between desired PTP clock frequency and HCLK rate.
-	 * Because HCLK is defined by a physical oscillator, it might drift due
-	 * to manufacturing tolerances and environmental effects (e.g. temperature).
-	 * It gets adjusted by calling ptp_clock_stm32_rate_adjust().
+	 * clk_ratio is the ratio between the desired PTP clock frequency and the
+	 * MAC timestamp reference clock. Because that reference is derived from a
+	 * physical oscillator, it might drift due to manufacturing tolerances and
+	 * environmental effects (e.g. temperature). It gets adjusted by calling
+	 * ptp_clock_stm32_rate_adjust().
 	 */
 	addend_val =
 		UINT32_MAX * eth_dev_data->clk_ratio;
