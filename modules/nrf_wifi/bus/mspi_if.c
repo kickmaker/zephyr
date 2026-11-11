@@ -51,8 +51,9 @@ static struct mspi_dev_cfg reg_cfg;
 /* Same as reg_cfg, clocked at 8 MHz for the RPU wake-up write. */
 static struct mspi_dev_cfg reg_cfg_8mhz;
 
-/* NULL outside of a session (reset on release), otherwise points at data_cfg
- * or reg_cfg, whichever was applied to the controller last.
+/* NULL until the first acquisition, then points at data_cfg, reg_cfg or
+ * reg_cfg_8mhz, whichever was applied to the controller last. The nRF70
+ * requires a dedicated bus, so the configuration persists between sessions.
  */
 static struct mspi_dev_cfg *active_cfg;
 
@@ -107,11 +108,6 @@ static void mspi_if_release(void)
 	while (mspi_get_channel_status(mspi_bus, 0)) {
 		;
 	}
-
-	/* Another device sharing the controller may reconfigure it once the
-	 * lock is released, so force a full reconfiguration on next acquire.
-	 */
-	active_cfg = NULL;
 
 	k_sem_give(&mspi_if_config->lock);
 }
@@ -350,6 +346,11 @@ int mspi_if_init(struct qspi_config *config)
 	if (!device_is_ready(mspi_bus)) {
 		LOG_ERR("Device %s is not ready", mspi_bus->name);
 		return -ENODEV;
+	}
+
+	if (DT_PROP(DT_BUS(NRF7002_NODE), software_multiperipheral)) {
+		LOG_ERR("MSPI %s: nRF70 requires a dedicated bus", mspi_bus->name);
+		return -ENOTSUP;
 	}
 
 	if ((data_cfg.io_mode != MSPI_IO_MODE_SINGLE) &&
