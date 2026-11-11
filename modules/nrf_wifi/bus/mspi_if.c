@@ -45,6 +45,9 @@ static struct mspi_dev_cfg data_cfg = MSPI_DEVICE_CONFIG_DT(NRF7002_NODE);
  */
 static struct mspi_dev_cfg reg_cfg;
 
+/* Same as reg_cfg, clocked at 8 MHz for the RPU wake-up write. */
+static struct mspi_dev_cfg reg_cfg_8mhz;
+
 /* NULL outside of a session (reset on release), otherwise points at data_cfg
  * or reg_cfg, whichever was applied to the controller last.
  */
@@ -78,7 +81,8 @@ static int mspi_if_acquire(struct mspi_dev_cfg *cfg)
 		 */
 		mask = MSPI_DEVICE_CONFIG_ALL;
 	} else {
-		mask = MSPI_DEVICE_CONFIG_IO_MODE | MSPI_DEVICE_CONFIG_DATA_RATE |
+		mask = MSPI_DEVICE_CONFIG_FREQUENCY |
+		       MSPI_DEVICE_CONFIG_IO_MODE | MSPI_DEVICE_CONFIG_DATA_RATE |
 		       MSPI_DEVICE_CONFIG_RX_DUMMY | MSPI_DEVICE_CONFIG_TX_DUMMY |
 		       MSPI_DEVICE_CONFIG_CMD_LEN | MSPI_DEVICE_CONFIG_ADDR_LEN;
 	}
@@ -261,7 +265,14 @@ int mspi_if_hl_read(unsigned int addr, void *data, int len)
 
 int mspi_if_cmd_rpu_wakeup_fn(uint32_t data)
 {
-	return mspi_if_WRSR2(NULL, (uint8_t)data);
+	struct mspi_dev_cfg *cfg = &reg_cfg;
+	uint8_t value = (uint8_t)data;
+
+	if (reg_cfg.freq > MHZ(8)) {
+		cfg = &reg_cfg_8mhz;
+	}
+	/* Waking RPU works reliably only with lowest frequency (8MHz) */
+	return mspi_if_xfer(cfg, MSPI_TX, MSPI_IF_OPCODE_WRSR2, 0, 0, 0, &value, 1);
 }
 
 int mspi_if_cmd_sleep_rpu_fn(void)
@@ -347,6 +358,9 @@ int mspi_if_init(struct qspi_config *config)
 	reg_cfg.addr_length = 0;
 	reg_cfg.rx_dummy = 0;
 	reg_cfg.tx_dummy = 0;
+
+	reg_cfg_8mhz = reg_cfg;
+	reg_cfg_8mhz.freq = MHZ(8);
 
 	active_cfg = NULL;
 
