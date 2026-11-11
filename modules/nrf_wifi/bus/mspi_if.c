@@ -224,17 +224,16 @@ int mspi_if_read(unsigned int addr, void *data, int len)
 	return mspi_if_xfer(&data_cfg, MSPI_RX, cmd, addr, MSPI_IF_ADDR_LEN, dummy, data, len);
 }
 
-/* High-latency read: same command/address as a normal read, but with extra
- * dummy cycles proportional to qspi_slave_latency, issued one word at a time
- * (see spim_hl_readw / qspi_hl_readw).
+/* High-latency read, one word per transfer. Unlike qspi_hl_readw() and
+ * spim_hl_readw(), no extra words are read for qspi_slave_latency: at 8 MHz,
+ * with the standard read dummy cycles, the first word clocked in is already
+ * the data at addr. At 16 MHz the RPU sends 0xAA fill bytes in place of the
+ * data, which this read does not handle.
  */
 static int mspi_if_hl_readw(unsigned int addr, void *data)
 {
 	uint32_t cmd = mspi_if_is_quad() ? MSPI_IF_OPCODE_READ4IO : MSPI_IF_OPCODE_FASTREAD;
 	uint16_t dummy = mspi_if_is_quad() ? MSPI_IF_READ4IO_DUMMY : MSPI_IF_READ_DUMMY;
-
-	/* Each latency unit adds 32 dummy clocks, in single and in quad mode. */
-	dummy += 32 * mspi_if_config->qspi_slave_latency;
 
 	return mspi_if_xfer(&data_cfg, MSPI_RX, cmd, addr, MSPI_IF_ADDR_LEN, dummy, data, 4);
 }
@@ -244,8 +243,6 @@ int mspi_if_hl_read(unsigned int addr, void *data, int len)
 	int count = 0;
 
 	mspi_if_addr_check(addr, data, len);
-
-	addr |= mspi_if_config->addrmask;
 
 	while (count < (len / 4)) {
 		int ret = mspi_if_hl_readw(addr + (4 * count), (char *)data + (4 * count));
