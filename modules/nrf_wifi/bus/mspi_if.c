@@ -9,10 +9,13 @@
  * Zephyr OS layer of the Wi-Fi driver.
  */
 
+#include <string.h>
+
 #include <zephyr/drivers/mspi/devicetree.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/util.h>
 #include <zephyr/drivers/wifi/nrf_wifi/bus/qspi_if.h>
+#include <zephyr/drivers/wifi/nrf_wifi/bus/rpu_hw_if.h>
 
 #include "mspi_if.h"
 
@@ -228,19 +231,34 @@ int mspi_if_read(unsigned int addr, void *data, int len)
 	return mspi_if_xfer(&data_cfg, MSPI_RX, cmd, addr, MSPI_IF_ADDR_LEN, dummy, data, len);
 }
 
-/* High-latency read: same command/address as a normal read, but with extra
- * dummy cycles proportional to qspi_slave_latency, issued one word at a time
- * (see spim_hl_readw / qspi_hl_readw).
+/* High-latency read: the RPU needs 4 extra bytes per latency unit before the
+ * data word, so read them and keep the last word (see qspi_hl_readw /
+ * spim_hl_readw).
  */
 static int mspi_if_hl_readw(unsigned int addr, void *data)
 {
 	uint32_t cmd = mspi_if_is_quad() ? MSPI_IF_OPCODE_READ4IO : MSPI_IF_OPCODE_FASTREAD;
 	uint16_t dummy = mspi_if_is_quad() ? MSPI_IF_READ4IO_DUMMY : MSPI_IF_READ_DUMMY;
+	uint8_t rxb[4 + (NRF_WIFI_QSPI_SLAVE_MAX_LATENCY * 4)];
+	uint32_t len = 4 + (4 * mspi_if_config->qspi_slave_latency);
+	int ret;
 
-	/* Each latency unit adds 32 dummy clocks, in single and in quad mode. */
-	dummy += 32 * mspi_if_config->qspi_slave_latency;
+	if (len > sizeof(rxb)) {
+		LOG_ERR("%s: len exceeded, check NRF_WIFI_QSPI_SLAVE_MAX_LATENCY (len=%u, rxb=%zu)",
+			__func__, (unsigned int)len, sizeof(rxb));
+		return -ENOMEM;
+	}
 
-	return mspi_if_xfer(&data_cfg, MSPI_RX, cmd, addr, MSPI_IF_ADDR_LEN, dummy, data, 4);
+	memset(rxb, 0, len);
+
+	ret = mspi_if_xfer(&data_cfg, MSPI_RX, cmd, addr, MSPI_IF_ADDR_LEN, dummy, rxb, len);
+	if (ret != 0) {
+		return ret;
+	}
+
+	*(uint32_t *)data = *(uint32_t *)(rxb + (len - 4));
+
+	return 0;
 }
 
 int mspi_if_hl_read(unsigned int addr, void *data, int len)
@@ -248,8 +266,6 @@ int mspi_if_hl_read(unsigned int addr, void *data, int len)
 	int count = 0;
 
 	mspi_if_addr_check(addr, data, len);
-
-	addr |= mspi_if_config->addrmask;
 
 	while (count < (len / 4)) {
 		int ret = mspi_if_hl_readw(addr + (4 * count), (char *)data + (4 * count));
