@@ -35,7 +35,7 @@ LOG_MODULE_DECLARE(wifi_nrf_bus, CONFIG_WIFI_NRF70_BUSLIB_LOG_LEVEL);
 #define MSPI_IF_ADDR_LEN        3
 #define MSPI_IF_READ_DUMMY      8  /* Single line FASTREAD dummy cycles */
 #define MSPI_IF_READ4IO_DUMMY   10 /* Quad READ4IO dummy cycles (RDC4IO = 0xA) */
-#define MSPI_IF_XFER_TIMEOUT_MS 10
+#define MSPI_IF_XFER_TIMEOUT_MS CONFIG_MSPI_COMPLETION_TIMEOUT_TOLERANCE
 
 static const struct device *mspi_bus = DEVICE_DT_GET(DT_BUS(NRF7002_NODE));
 static const struct mspi_dev_id dev_id = MSPI_DEVICE_ID_DT(NRF7002_NODE);
